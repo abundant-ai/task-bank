@@ -1,0 +1,221 @@
+diff --git a/.github/workflows/harbor-check.yml b/.github/workflows/harbor-check.yml
+index df816256..007ce254 100644
+--- a/.github/workflows/harbor-check.yml
++++ b/.github/workflows/harbor-check.yml
+@@ -38,16 +38,18 @@ jobs:
+       
+       - name: Check Harbor Task Eligibility
+         id: harbor-check
+-        uses: abundant-ai/taskgen/action@rishi/task-bank-submission
++        uses: abundant-ai/taskgen@v1
+         with:
+           github_token: ${{ secrets.GITHUB_TOKEN }}
+           
+-          # === API Keys ===
++          # === API Keys (Optional but Recommended) ===
++          # These enable full validation. Without them, only basic checks run.
++          #
+           # Claude Code auth (use ONE of these):
+-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}  # Preferred
+-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}              # Fallback
+-          
+-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
++          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}  # Preferred
++          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}              # Fallback
++          #
++          # openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+           
+           # === Configuration ===
+           
+@@ -67,6 +69,9 @@ jobs:
+           
+           # Claude Code timeout in seconds (default: 1800 = 30 min)
+           # cc_timeout: 1800
++          
++          # Target repo for task submissions (default: abundant-ai/taskgen)
++          # target_repo: abundant-ai/taskgen
+       
+       # Upload task artifact (if eligible)
+       - name: Upload Task Artifact
+@@ -74,7 +79,7 @@ jobs:
+         uses: actions/upload-artifact@v4
+         with:
+           name: ${{ steps.harbor-check.outputs.artifact_name }}
+-          path: ${{ github.workspace }}/harbor-tasks/${{ steps.harbor-check.outputs.task_id }}
++          path: /tmp/harbor-tasks/${{ steps.harbor-check.outputs.task_id }}
+           retention-days: 30
+       
+       # Optional: Add comment to PR with results
+diff --git a/packages/zod/src/v3/helpers/util.ts b/packages/zod/src/v3/helpers/util.ts
+index a8efb360..030ea821 100644
+--- a/packages/zod/src/v3/helpers/util.ts
++++ b/packages/zod/src/v3/helpers/util.ts
+@@ -1,7 +1,3 @@
+-/**
+- * Utility namespace for zod helper functions and types.
+- * Contains type assertions, object utilities, and validation helpers.
+- */
+ export namespace util {
+   type AssertEqual<T, U> = (<V>() => V extends T ? 1 : 2) extends <V>() => V extends U ? 1 : 2 ? true : false;
+ 
+diff --git a/packages/zod/src/v3/tests/string.test.ts b/packages/zod/src/v3/tests/string.test.ts
+index c446f466..2d712e10 100644
+--- a/packages/zod/src/v3/tests/string.test.ts
++++ b/packages/zod/src/v3/tests/string.test.ts
+@@ -38,31 +38,6 @@ test("failing validations", () => {
+   expect(() => endsWith.parse("x")).toThrow();
+ });
+ 
+-test("includes with invalid position", () => {
+-  const negativePosition = z.string().includes("test", { position: -1 });
+-  const tooLargePosition = z.string().includes("test", { position: 100 });
+-
+-  // Negative position should fail validation
+-  expect(() => negativePosition.parse("test string")).toThrow();
+-
+-  // Position beyond string length should fail validation
+-  expect(() => tooLargePosition.parse("short")).toThrow();
+-});
+-
+-test("startsWith with empty prefix", () => {
+-  const emptyPrefix = z.string().startsWith("");
+-  // Empty prefix should always pass (all strings start with empty string)
+-  emptyPrefix.parse("any string");
+-  emptyPrefix.parse("");
+-});
+-
+-test("endsWith with empty suffix", () => {
+-  const emptySuffix = z.string().endsWith("");
+-  // Empty suffix should always pass (all strings end with empty string)
+-  emptySuffix.parse("any string");
+-  emptySuffix.parse("");
+-});
+-
+ test("email validations", () => {
+   const validEmails = [
+     `email@domain.com`,
+diff --git a/packages/zod/src/v3/types.ts b/packages/zod/src/v3/types.ts
+index 2adaefd7..f4028549 100644
+--- a/packages/zod/src/v3/types.ts
++++ b/packages/zod/src/v3/types.ts
+@@ -902,17 +902,7 @@ export class ZodString extends ZodType<string, ZodStringDef, string> {
+       } else if (check.kind === "trim") {
+         input.data = input.data.trim();
+       } else if (check.kind === "includes") {
+-        // FIX: Validate position parameter to prevent out-of-bounds access
+-        const position = check.position ?? 0;
+-        if (position < 0 || position > (input.data as string).length) {
+-          ctx = this._getOrReturnCtx(input, ctx);
+-          addIssueToContext(ctx, {
+-            code: ZodIssueCode.invalid_string,
+-            validation: { includes: check.value, position: check.position },
+-            message: check.message,
+-          });
+-          status.dirty();
+-        } else if (!(input.data as string).includes(check.value, check.position)) {
++        if (!(input.data as string).includes(check.value, check.position)) {
+           ctx = this._getOrReturnCtx(input, ctx);
+           addIssueToContext(ctx, {
+             code: ZodIssueCode.invalid_string,
+@@ -926,8 +916,7 @@ export class ZodString extends ZodType<string, ZodStringDef, string> {
+       } else if (check.kind === "toUpperCase") {
+         input.data = input.data.toUpperCase();
+       } else if (check.kind === "startsWith") {
+-        // FIX: Handle empty prefix edge case
+-        if (check.value.length > 0 && !(input.data as string).startsWith(check.value)) {
++        if (!(input.data as string).startsWith(check.value)) {
+           ctx = this._getOrReturnCtx(input, ctx);
+           addIssueToContext(ctx, {
+             code: ZodIssueCode.invalid_string,
+@@ -937,8 +926,7 @@ export class ZodString extends ZodType<string, ZodStringDef, string> {
+           status.dirty();
+         }
+       } else if (check.kind === "endsWith") {
+-        // FIX: Handle empty suffix edge case
+-        if (check.value.length > 0 && !(input.data as string).endsWith(check.value)) {
++        if (!(input.data as string).endsWith(check.value)) {
+           ctx = this._getOrReturnCtx(input, ctx);
+           addIssueToContext(ctx, {
+             code: ZodIssueCode.invalid_string,
+diff --git a/packages/zod/src/v4/classic/tests/string.test.ts b/packages/zod/src/v4/classic/tests/string.test.ts
+index 8ac0caac..bbf6930c 100644
+--- a/packages/zod/src/v4/classic/tests/string.test.ts
++++ b/packages/zod/src/v4/classic/tests/string.test.ts
+@@ -64,31 +64,6 @@ test("startswith/endswith", () => {
+   expect(() => endsWith.parse("x")).toThrow();
+ });
+ 
+-test("includes with invalid position", () => {
+-  const negativePosition = z.string().includes("test", { position: -1 });
+-  const tooLargePosition = z.string().includes("test", { position: 100 });
+-
+-  // Negative position should fail validation
+-  expect(() => negativePosition.parse("test string")).toThrow();
+-
+-  // Position beyond string length should fail validation
+-  expect(() => tooLargePosition.parse("short")).toThrow();
+-});
+-
+-test("startsWith with empty prefix", () => {
+-  const emptyPrefix = z.string().startsWith("");
+-  // Empty prefix should always pass (all strings start with empty string)
+-  emptyPrefix.parse("any string");
+-  emptyPrefix.parse("");
+-});
+-
+-test("endsWith with empty suffix", () => {
+-  const emptySuffix = z.string().endsWith("");
+-  // Empty suffix should always pass (all strings end with empty string)
+-  emptySuffix.parse("any string");
+-  emptySuffix.parse("");
+-});
+-
+ test("email validations", () => {
+   const validEmails = [
+     `email@domain.com`,
+diff --git a/packages/zod/src/v4/core/checks.ts b/packages/zod/src/v4/core/checks.ts
+index 980798e5..7d4534e8 100644
+--- a/packages/zod/src/v4/core/checks.ts
++++ b/packages/zod/src/v4/core/checks.ts
+@@ -976,21 +976,6 @@ export const $ZodCheckIncludes: core.$constructor<$ZodCheckIncludes> = /*@__PURE
+     });
+ 
+     inst._zod.check = (payload) => {
+-      // FIX: Validate position parameter to prevent out-of-bounds access
+-      const position = def.position ?? 0;
+-      if (position < 0 || position > payload.value.length) {
+-        payload.issues.push({
+-          origin: "string",
+-          code: "invalid_format",
+-          format: "includes",
+-          includes: def.includes,
+-          input: payload.value,
+-          inst,
+-          continue: !def.abort,
+-        });
+-        return;
+-      }
+-
+       if (payload.value.includes(def.includes, def.position)) return;
+       payload.issues.push({
+         origin: "string",
+@@ -1035,9 +1020,6 @@ export const $ZodCheckStartsWith: core.$constructor<$ZodCheckStartsWith> = /*@__
+     });
+ 
+     inst._zod.check = (payload) => {
+-      // FIX: Handle empty prefix edge case
+-      if (def.prefix.length === 0) return;
+-
+       if (payload.value.startsWith(def.prefix)) return;
+       payload.issues.push({
+         origin: "string",
+@@ -1082,9 +1064,6 @@ export const $ZodCheckEndsWith: core.$constructor<$ZodCheckEndsWith> = /*@__PURE
+     });
+ 
+     inst._zod.check = (payload) => {
+-      // FIX: Handle empty suffix edge case
+-      if (def.suffix.length === 0) return;
+-
+       if (payload.value.endsWith(def.suffix)) return;
+       payload.issues.push({
+         origin: "string",
