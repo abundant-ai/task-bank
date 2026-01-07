@@ -1,0 +1,203 @@
+# Process Task Bank Submissions
+#
+# Triggered when a new issue with label "task-submission" is created.
+# Downloads the task artifact from the source repo and creates a PR.
+
+name: Process Task Submission
+
+on:
+  issues:
+    types: [opened, labeled]
+
+jobs:
+  process:
+    # Only run on issues with the task-submission label
+    if: contains(github.event.issue.labels.*.name, 'task-submission')
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    
+    steps:
+      - name: Checkout task-bank
+        uses: actions/checkout@v4
+      
+      - name: Parse submission details
+        id: parse
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body;
+            
+            // Extract fields from markdown table
+            const taskIdMatch = body.match(/\*\*Task ID\*\*\s*\|\s*`([^`]+)`/);
+            const repoMatch = body.match(/\*\*Source Repo\*\*\s*\|\s*\[([^\]]+)\]/);
+            const prMatch = body.match(/\*\*Source PR\*\*\s*\|\s*\[#(\d+)\]/);
+            const runIdMatch = body.match(/\*\*Run ID\*\*\s*\|\s*`(\d+)`/);
+            
+            if (!taskIdMatch || !repoMatch || !runIdMatch) {
+              core.setFailed('Could not parse submission details from issue body');
+              return;
+            }
+            
+            const taskId = taskIdMatch[1];
+            const sourceRepo = repoMatch[1];
+            const sourcePr = prMatch ? prMatch[1] : 'unknown';
+            const runId = runIdMatch[1];
+            
+            console.log(`Task ID: ${taskId}`);
+            console.log(`Source Repo: ${sourceRepo}`);
+            console.log(`Source PR: #${sourcePr}`);
+            console.log(`Run ID: ${runId}`);
+            
+            core.setOutput('task_id', taskId);
+            core.setOutput('source_repo', sourceRepo);
+            core.setOutput('source_pr', sourcePr);
+            core.setOutput('run_id', runId);
+      
+      - name: Check for duplicate submission
+        id: check-duplicate
+        run: |
+          TASK_ID="${{ steps.parse.outputs.task_id }}"
+          if [[ -d "tasks/$TASK_ID" ]]; then
+            echo "duplicate=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Task $TASK_ID already exists in task-bank"
+          else
+            echo "duplicate=false" >> "$GITHUB_OUTPUT"
+          fi
+      
+      - name: Comment on duplicate
+        if: steps.check-duplicate.outputs.duplicate == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const taskId = '${{ steps.parse.outputs.task_id }}';
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `⚠️ **Duplicate Submission**\n\nTask \`${taskId}\` already exists in task-bank. Closing this issue.\n\nIf you believe this is an error, please comment below.`
+            });
+            
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              state: 'closed',
+              labels: ['task-submission', 'duplicate']
+            });
+      
+      - name: Download artifact from source repo
+        if: steps.check-duplicate.outputs.duplicate == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          
+          REPO="${{ steps.parse.outputs.source_repo }}"
+          RUN_ID="${{ steps.parse.outputs.run_id }}"
+          TASK_ID="${{ steps.parse.outputs.task_id }}"
+          
+          echo "Fetching artifact from $REPO run $RUN_ID..."
+          
+          # List artifacts from the workflow run
+          ARTIFACTS_JSON=$(gh api "/repos/$REPO/actions/runs/$RUN_ID/artifacts" || echo '{"artifacts":[]}')
+          
+          # Find the harbor-task artifact
+          ARTIFACT_ID=$(echo "$ARTIFACTS_JSON" | jq -r '.artifacts[] | select(.name | startswith("harbor-task-")) | .id' | head -1)
+          
+          if [[ -z "$ARTIFACT_ID" || "$ARTIFACT_ID" == "null" ]]; then
+            echo "::error::No harbor-task artifact found in run $RUN_ID"
+            echo "Available artifacts:"
+            echo "$ARTIFACTS_JSON" | jq -r '.artifacts[].name'
+            exit 1
+          fi
+          
+          echo "Found artifact ID: $ARTIFACT_ID"
+          
+          # Download the artifact (works for public repos)
+          gh api "/repos/$REPO/actions/artifacts/$ARTIFACT_ID/zip" > task.zip
+          
+          # Extract to tasks directory
+          mkdir -p "tasks/$TASK_ID"
+          unzip -o task.zip -d "tasks/$TASK_ID"
+          
+          echo "Task extracted to tasks/$TASK_ID"
+          ls -la "tasks/$TASK_ID"
+      
+      - name: Create Pull Request
+        if: steps.check-duplicate.outputs.duplicate == 'false'
+        id: create-pr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "Add task: ${{ steps.parse.outputs.task_id }}"
+          title: "Task: ${{ steps.parse.outputs.task_id }}"
+          body: |
+            ## Task Submission
+            
+            | Field | Value |
+            |-------|-------|
+            | **Task ID** | `${{ steps.parse.outputs.task_id }}` |
+            | **Source** | [${{ steps.parse.outputs.source_repo }}#${{ steps.parse.outputs.source_pr }}](https://github.com/${{ steps.parse.outputs.source_repo }}/pull/${{ steps.parse.outputs.source_pr }}) |
+            | **Submitted via** | #${{ github.event.issue.number }} |
+            
+            ---
+            
+            Auto-imported from community submission.
+            
+            ### Review Checklist
+            
+            - [ ] Task structure looks correct
+            - [ ] Instruction is clear and actionable
+            - [ ] No sensitive data in patches
+            
+          branch: "tasks/${{ steps.parse.outputs.task_id }}"
+          labels: |
+            task
+            needs-review
+      
+      - name: Update issue with PR link
+        if: steps.check-duplicate.outputs.duplicate == 'false' && steps.create-pr.outputs.pull-request-number
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = '${{ steps.create-pr.outputs.pull-request-number }}';
+            const taskId = '${{ steps.parse.outputs.task_id }}';
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `✅ **Task Imported!**\n\nPR #${prNumber} has been created for review.\n\nThis issue will be updated when the PR is merged or closed.`
+            });
+            
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['processing']
+            });
+      
+      - name: Handle artifact download failure
+        if: failure() && steps.check-duplicate.outputs.duplicate == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `❌ **Import Failed**\n\nCould not download the task artifact. This might happen if:\n- The source repo is private\n- The workflow run has expired (artifacts expire after 90 days)\n- The artifact was not uploaded correctly\n\nPlease check the [workflow logs](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`
+            });
+            
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['import-failed']
+            });
+

@@ -1,0 +1,81 @@
+# Close Submission Issues when PR is merged or closed
+#
+# This workflow automatically closes the submission issue when the 
+# corresponding PR is merged or closed.
+
+name: Close Submission Issue
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  close-issue:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: read
+    
+    steps:
+      - name: Find and close linked issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prBody = context.payload.pull_request.body || '';
+            const prMerged = context.payload.pull_request.merged;
+            
+            // Look for "Submitted via #123" pattern in PR body
+            const issueMatch = prBody.match(/Submitted via.*#(\d+)/);
+            
+            if (!issueMatch) {
+              console.log('No linked submission issue found in PR body');
+              return;
+            }
+            
+            const issueNumber = parseInt(issueMatch[1]);
+            console.log(`Found linked issue #${issueNumber}`);
+            
+            const status = prMerged ? 'merged' : 'closed';
+            const emoji = prMerged ? '✅' : '❌';
+            const message = prMerged 
+              ? `${emoji} **Task Added!**\n\nThe PR was merged and this task is now part of task-bank. Thank you for your contribution!`
+              : `${emoji} **PR Closed**\n\nThe PR was closed without merging. The task was not added to task-bank.`;
+            
+            // Add comment to issue
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: message
+            });
+            
+            // Close the issue
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              state: 'closed',
+              state_reason: prMerged ? 'completed' : 'not_planned'
+            });
+            
+            // Update labels
+            const labelToAdd = prMerged ? 'imported' : 'rejected';
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              labels: [labelToAdd]
+            });
+            
+            // Remove processing label
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                name: 'processing'
+              });
+            } catch (e) {
+              // Label might not exist, ignore
+            }
+
